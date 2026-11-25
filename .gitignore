@@ -1,0 +1,8 @@
+.Xil/
+*.jou
+*.log
+*.cache/
+*.runs/
+*.sim/
+__pycache__/
+.venv/

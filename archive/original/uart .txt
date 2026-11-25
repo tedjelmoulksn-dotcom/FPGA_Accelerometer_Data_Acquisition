@@ -1,0 +1,122 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity uart_sender is
+    port (
+        clk       : in  std_logic;
+        reset_n   : in  std_logic;
+
+        acl_data  : in  std_logic_vector(14 downto 0);  -- 15 bits : X[14:10], Y[9:5], Z[4:0]
+
+        txd       : out std_logic
+    );
+end entity;
+
+architecture rtl of uart_sender is
+
+    component uart_tx
+        generic (
+            CLK_FREQ : integer := 100000000;
+            BAUD     : integer := 115200
+        );
+        port (
+            clk      : in  std_logic;
+            reset_n  : in  std_logic;
+            tx_start : in  std_logic;
+            tx_data  : in  std_logic_vector(7 downto 0);
+            tx_busy  : out std_logic;
+            txd      : out std_logic
+        );
+    end component;
+
+    -- on fabrique 3 octets X,Y,Z à partir de acl_data
+    signal x_byte, y_byte, z_byte : std_logic_vector(7 downto 0);
+
+    -- signaux UART
+    signal tx_start : std_logic := '0';
+    signal tx_data  : std_logic_vector(7 downto 0) := (others => '0');
+    signal tx_busy  : std_logic;
+
+    type state_t is (SEND_X, SEND_Y, SEND_Z);
+    signal state : state_t := SEND_X;
+
+    -- petit diviseur pour ne pas envoyer trop vite (optionnel)
+    signal slow_cnt : integer range 0 to 10_000_000 := 0;
+    signal tick     : std_logic := '0';
+
+begin
+
+    -- instanciation de l'uart_tx
+    U_TX : uart_tx
+        port map (
+            clk      => clk,
+            reset_n  => reset_n,
+            tx_start => tx_start,
+            tx_data  => tx_data,
+            tx_busy  => tx_busy,
+            txd      => txd
+        );
+
+    -- empaquetage des 5 bits par axe en 1 octet :
+    -- bit7 = signe, bits6..3 = 4 bits de data, bits2..0 = 000
+    x_byte <= acl_data(14) & acl_data(13 downto 10) & "000";
+    y_byte <= acl_data(9)  & acl_data(8 downto 5)  & "000";
+    z_byte <= acl_data(4)  & acl_data(3 downto 0)  & "000";
+
+    -- générer un "tick" périodique (par ex ~100 Hz)
+    process(clk, reset_n)
+    begin
+        if reset_n = '0' then
+            slow_cnt <= 0;
+            tick     <= '0';
+        elsif rising_edge(clk) then
+            tick <= '0';
+            if slow_cnt = 1_000_000 then   -- à 100 MHz ? 10 ms
+                slow_cnt <= 0;
+                tick     <= '1';
+            else
+                slow_cnt <= slow_cnt + 1;
+            end if;
+        end if;
+    end process;
+
+    -- FSM d'envoi de X, Y, Z en boucle
+    process(clk, reset_n)
+    begin
+        if reset_n = '0' then
+            state    <= SEND_X;
+            tx_start <= '0';
+            tx_data  <= (others => '0');
+        elsif rising_edge(clk) then
+            tx_start <= '0';
+
+            case state is
+
+                when SEND_X =>
+                    if tick = '1' and tx_busy = '0' then
+                        tx_data  <= x_byte;
+                        tx_start <= '1';
+                        state    <= SEND_Y;
+                    end if;
+
+                when SEND_Y =>
+                    if tx_busy = '0' then
+                        tx_data  <= y_byte;
+                        tx_start <= '1';
+                        state    <= SEND_Z;
+                    end if;
+
+                when SEND_Z =>
+                    if tx_busy = '0' then
+                        tx_data  <= z_byte;
+                        tx_start <= '1';
+                        state    <= SEND_X;
+                    end if;
+
+            end case;
+        end if;
+    end process;
+
+end architecture;
+

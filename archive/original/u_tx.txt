@@ -1,0 +1,91 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity uart_tx is
+    generic (
+        CLK_FREQ : integer := 100000000;  -- horloge 100 MHz
+        BAUD     : integer := 115200      -- débit série
+    );
+    port (
+        clk      : in  std_logic;
+        reset_n  : in  std_logic;
+        tx_start : in  std_logic;
+        tx_data  : in  std_logic_vector(7 downto 0);
+        tx_busy  : out std_logic;
+        txd      : out std_logic
+    );
+end entity;
+
+architecture rtl of uart_tx is
+    constant BAUD_TICK : integer := CLK_FREQ / BAUD;
+
+    type state_t is (IDLE, START_BIT, DATA_BITS, STOP_BIT);
+    signal state      : state_t := IDLE;
+    signal bit_index  : integer range 0 to 7 := 0;
+    signal baud_cnt   : integer := 0;
+    signal tx_reg     : std_logic := '1';
+    signal data_buf   : std_logic_vector(7 downto 0) := (others => '0');
+begin
+
+    txd     <= tx_reg;
+    tx_busy <= '1' when state /= IDLE else '0';
+
+    process(clk, reset_n)
+    begin
+        if reset_n = '0' then
+            state     <= IDLE;
+            tx_reg    <= '1';
+            baud_cnt  <= 0;
+            bit_index <= 0;
+        elsif rising_edge(clk) then
+
+            case state is
+
+                when IDLE =>
+                    if tx_start = '1' then
+                        data_buf  <= tx_data;
+                        tx_reg    <= '0';  -- start bit
+                        baud_cnt  <= 0;
+                        state     <= START_BIT;
+                    end if;
+
+                when START_BIT =>
+                    if baud_cnt = BAUD_TICK-1 then
+                        baud_cnt  <= 0;
+                        bit_index <= 0;
+                        tx_reg    <= data_buf(0);
+                        state     <= DATA_BITS;
+                    else
+                        baud_cnt <= baud_cnt + 1;
+                    end if;
+
+                when DATA_BITS =>
+                    if baud_cnt = BAUD_TICK-1 then
+                        baud_cnt <= 0;
+                        if bit_index = 7 then
+                            tx_reg <= '1';  -- stop bit
+                            state  <= STOP_BIT;
+                        else
+                            bit_index <= bit_index + 1;
+                            tx_reg    <= data_buf(bit_index + 1);
+                        end if;
+                    else
+                        baud_cnt <= baud_cnt + 1;
+                    end if;
+
+                when STOP_BIT =>
+                    if baud_cnt = BAUD_TICK-1 then
+                        baud_cnt <= 0;
+                        state    <= IDLE;
+                        tx_reg   <= '1';
+                    else
+                        baud_cnt <= baud_cnt + 1;
+                    end if;
+
+            end case;
+
+        end if;
+    end process;
+
+end architecture;

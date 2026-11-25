@@ -1,0 +1,682 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+entity spi_master is
+    port (
+        iclk     : in  std_logic;                         -- 4 MHz
+        miso     : in  std_logic;
+        sclk     : out std_logic;
+        mosi     : out std_logic;
+        cs       : out std_logic;
+        acl_data : out std_logic_vector(14 downto 0)      -- 15 bits
+    );
+end entity;
+
+architecture rtl of spi_master is
+
+    -- Clock division interne
+    signal sclk_control : std_logic := '0';
+    signal clk_counter  : std_logic := '0';
+    signal clk_reg      : std_logic := '1';
+
+    -- Registres SPI / données
+    signal write_instr   : std_logic_vector(7 downto 0)  := x"0A";
+    signal mode_reg_addr : std_logic_vector(7 downto 0)  := x"2D";
+    signal mode_wr_data  : std_logic_vector(7 downto 0)  := x"02";
+    signal read_instr    : std_logic_vector(7 downto 0)  := x"0B";
+    signal x_LSB_addr    : std_logic_vector(7 downto 0)  := x"0E";
+
+    signal temp_DATA     : std_logic_vector(14 downto 0) := (others => '0');
+    signal X             : std_logic_vector(15 downto 0) := (others => '0');
+    signal Y             : std_logic_vector(15 downto 0) := (others => '0');
+    signal Z             : std_logic_vector(15 downto 0) := (others => '0');
+
+    signal counter       : integer range 0 to 500000000 := 0;
+    signal latch_data    : std_logic;
+
+    -- FSM
+    type state_t is (
+        POWER_UP,
+        BEGIN_SPIW,
+        SEND_WCMD7, SEND_WCMD6, SEND_WCMD5, SEND_WCMD4, SEND_WCMD3, SEND_WCMD2, SEND_WCMD1, SEND_WCMD0,
+        SEND_WADDR7, SEND_WADDR6, SEND_WADDR5, SEND_WADDR4, SEND_WADDR3, SEND_WADDR2, SEND_WADDR1, SEND_WADDR0,
+        SEND_BYTE7, SEND_BYTE6, SEND_BYTE5, SEND_BYTE4, SEND_BYTE3, SEND_BYTE2, SEND_BYTE1, SEND_BYTE0,
+        WAIT_STATE,
+        BEGIN_SPIR,
+        SEND_RCMD7, SEND_RCMD6, SEND_RCMD5, SEND_RCMD4, SEND_RCMD3, SEND_RCMD2, SEND_RCMD1, SEND_RCMD0,
+        SEND_RADDR7, SEND_RADDR6, SEND_RADDR5, SEND_RADDR4, SEND_RADDR3, SEND_RADDR2, SEND_RADDR1, SEND_RADDR0,
+        REC_XLSB7, REC_XLSB6, REC_XLSB5, REC_XLSB4, REC_XLSB3, REC_XLSB2, REC_XLSB1, REC_XLSB0,
+        REC_XMSB7, REC_XMSB6, REC_XMSB5, REC_XMSB4, REC_XMSB3, REC_XMSB2, REC_XMSB1, REC_XMSB0,
+        REC_YLSB7, REC_YLSB6, REC_YLSB5, REC_YLSB4, REC_YLSB3, REC_YLSB2, REC_YLSB1, REC_YLSB0,
+        REC_YMSB7, REC_YMSB6, REC_YMSB5, REC_YMSB4, REC_YMSB3, REC_YMSB2, REC_YMSB1, REC_YMSB0,
+        REC_ZLSB7, REC_ZLSB6, REC_ZLSB5, REC_ZLSB4, REC_ZLSB3, REC_ZLSB2, REC_ZLSB1, REC_ZLSB0,
+        REC_ZMSB7, REC_ZMSB6, REC_ZMSB5, REC_ZMSB4, REC_ZMSB3, REC_ZMSB2, REC_ZMSB1, REC_ZMSB0,
+        END_SPI
+    );
+
+    signal state_reg : state_t := POWER_UP;
+
+begin
+
+    -- Sorties
+    acl_data <= temp_DATA;
+    sclk     <= clk_reg when sclk_control = '1' else '0';
+
+    -----------------------------------------------------------------
+    -- Division de clock : 4 MHz -> ~1 MHz sur clk_reg (comme Verilog)
+    -----------------------------------------------------------------
+    process(iclk)
+    begin
+        if rising_edge(iclk) then
+            -- même logique que : clk_counter <= clk_counter + 1; if (clk_counter == 1) clk_reg <= ~clk_reg;
+            if clk_counter = '1' then
+                clk_reg <= not clk_reg;
+            end if;
+            clk_counter <= not clk_counter;
+        end if;
+    end process;
+
+    -----------------------------------------------------------------
+    -- FSM principale (même timings que ton Verilog)
+    -----------------------------------------------------------------
+    process(iclk)
+    begin
+        if rising_edge(iclk) then
+            counter <= counter + 1;
+
+            case state_reg is
+                -----------------------------------------------------------------
+                when POWER_UP =>
+                    if counter = 23999 then
+                        state_reg <= BEGIN_SPIW;
+                    end if;
+
+                when BEGIN_SPIW =>
+                    if counter = 24001 then
+                        state_reg    <= SEND_WCMD7;
+                        cs           <= '0';
+                    end if;
+
+                -- Envoi write_instr
+                when SEND_WCMD7 =>
+                    sclk_control <= '1';
+                    mosi <= write_instr(7);
+                    if counter = 24005 then
+                        state_reg <= SEND_WCMD6;
+                    end if;
+
+                when SEND_WCMD6 =>
+                    mosi <= write_instr(6);
+                    if counter = 24009 then
+                        state_reg <= SEND_WCMD5;
+                    end if;
+
+                when SEND_WCMD5 =>
+                    mosi <= write_instr(5);
+                    if counter = 24013 then
+                        state_reg <= SEND_WCMD4;
+                    end if;
+
+                when SEND_WCMD4 =>
+                    mosi <= write_instr(4);
+                    if counter = 24017 then
+                        state_reg <= SEND_WCMD3;
+                    end if;
+
+                when SEND_WCMD3 =>
+                    mosi <= write_instr(3);
+                    if counter = 24021 then
+                        state_reg <= SEND_WCMD2;
+                    end if;
+
+                when SEND_WCMD2 =>
+                    mosi <= write_instr(2);
+                    if counter = 24025 then
+                        state_reg <= SEND_WCMD1;
+                    end if;
+
+                when SEND_WCMD1 =>
+                    mosi <= write_instr(1);
+                    if counter = 24029 then
+                        state_reg <= SEND_WCMD0;
+                    end if;
+
+                when SEND_WCMD0 =>
+                    mosi <= write_instr(0);
+                    if counter = 24033 then
+                        state_reg <= SEND_WADDR7;
+                    end if;
+
+                -- Adresse du registre de mode
+                when SEND_WADDR7 =>
+                    mosi <= mode_reg_addr(7);
+                    if counter = 24037 then
+                        state_reg <= SEND_WADDR6;
+                    end if;
+
+                when SEND_WADDR6 =>
+                    mosi <= mode_reg_addr(6);
+                    if counter = 24041 then
+                        state_reg <= SEND_WADDR5;
+                    end if;
+
+                when SEND_WADDR5 =>
+                    mosi <= mode_reg_addr(5);
+                    if counter = 24045 then
+                        state_reg <= SEND_WADDR4;
+                    end if;
+
+                when SEND_WADDR4 =>
+                    mosi <= mode_reg_addr(4);
+                    if counter = 24049 then
+                        state_reg <= SEND_WADDR3;
+                    end if;
+
+                when SEND_WADDR3 =>
+                    mosi <= mode_reg_addr(3);
+                    if counter = 24053 then
+                        state_reg <= SEND_WADDR2;
+                    end if;
+
+                when SEND_WADDR2 =>
+                    mosi <= mode_reg_addr(2);
+                    if counter = 24057 then
+                        state_reg <= SEND_WADDR1;
+                    end if;
+
+                when SEND_WADDR1 =>
+                    mosi <= mode_reg_addr(1);
+                    if counter = 24061 then
+                        state_reg <= SEND_WADDR0;
+                    end if;
+
+                when SEND_WADDR0 =>
+                    mosi <= mode_reg_addr(0);
+                    if counter = 24065 then
+                        state_reg <= SEND_BYTE7;
+                    end if;
+
+                -- Donnée de configuration (0x02)
+                when SEND_BYTE7 =>
+                    mosi <= mode_wr_data(7);
+                    if counter = 24069 then
+                        state_reg <= SEND_BYTE6;
+                    end if;
+
+                when SEND_BYTE6 =>
+                    mosi <= mode_wr_data(6);
+                    if counter = 24073 then
+                        state_reg <= SEND_BYTE5;
+                    end if;
+
+                when SEND_BYTE5 =>
+                    mosi <= mode_wr_data(5);
+                    if counter = 24077 then
+                        state_reg <= SEND_BYTE4;
+                    end if;
+
+                when SEND_BYTE4 =>
+                    mosi <= mode_wr_data(4);
+                    if counter = 24081 then
+                        state_reg <= SEND_BYTE3;
+                    end if;
+
+                when SEND_BYTE3 =>
+                    mosi <= mode_wr_data(3);
+                    if counter = 24085 then
+                        state_reg <= SEND_BYTE2;
+                    end if;
+
+                when SEND_BYTE2 =>
+                    mosi <= mode_wr_data(2);
+                    if counter = 24089 then
+                        state_reg <= SEND_BYTE1;
+                    end if;
+
+                when SEND_BYTE1 =>
+                    mosi <= mode_wr_data(1);
+                    if counter = 24093 then
+                        state_reg <= SEND_BYTE0;
+                    end if;
+
+                when SEND_BYTE0 =>
+                    mosi <= mode_wr_data(0);
+                    if counter = 24097 then
+                        state_reg    <= WAIT_STATE;
+                        counter      <= 0;
+                        cs           <= '1';
+                        sclk_control <= '0';
+                    end if;
+
+                -- Attente 40 ms
+                when WAIT_STATE =>
+                    if counter = 160002 then
+                        counter   <= 0;
+                        state_reg <= BEGIN_SPIR;
+                    end if;
+
+                -- Début lecture
+                when BEGIN_SPIR =>
+                    if counter = 1 then
+                        state_reg    <= SEND_RCMD7;
+                        cs           <= '0';
+                        sclk_control <= '1';
+                    end if;
+
+                -- Envoi read_instr
+                when SEND_RCMD7 =>
+                    mosi <= read_instr(7);
+                    if counter = 4 then
+                        state_reg <= SEND_RCMD6;
+                    end if;
+
+                when SEND_RCMD6 =>
+                    mosi <= read_instr(6);
+                    if counter = 8 then
+                        state_reg <= SEND_RCMD5;
+                    end if;
+
+                when SEND_RCMD5 =>
+                    mosi <= read_instr(5);
+                    if counter = 12 then
+                        state_reg <= SEND_RCMD4;
+                    end if;
+
+                when SEND_RCMD4 =>
+                    mosi <= read_instr(4);
+                    if counter = 16 then
+                        state_reg <= SEND_RCMD3;
+                    end if;
+
+                when SEND_RCMD3 =>
+                    mosi <= read_instr(3);
+                    if counter = 20 then
+                        state_reg <= SEND_RCMD2;
+                    end if;
+
+                when SEND_RCMD2 =>
+                    mosi <= read_instr(2);
+                    if counter = 24 then
+                        state_reg <= SEND_RCMD1;
+                    end if;
+
+                when SEND_RCMD1 =>
+                    mosi <= read_instr(1);
+                    if counter = 28 then
+                        state_reg <= SEND_RCMD0;
+                    end if;
+
+                when SEND_RCMD0 =>
+                    mosi <= read_instr(0);
+                    if counter = 32 then
+                        state_reg <= SEND_RADDR7;
+                    end if;
+
+                -- Adresse X LSB
+                when SEND_RADDR7 =>
+                    mosi <= x_LSB_addr(7);
+                    if counter = 36 then
+                        state_reg <= SEND_RADDR6;
+                    end if;
+
+                when SEND_RADDR6 =>
+                    mosi <= x_LSB_addr(6);
+                    if counter = 40 then
+                        state_reg <= SEND_RADDR5;
+                    end if;
+
+                when SEND_RADDR5 =>
+                    mosi <= x_LSB_addr(5);
+                    if counter = 44 then
+                        state_reg <= SEND_RADDR4;
+                    end if;
+
+                when SEND_RADDR4 =>
+                    mosi <= x_LSB_addr(4);
+                    if counter = 48 then
+                        state_reg <= SEND_RADDR3;
+                    end if;
+
+                when SEND_RADDR3 =>
+                    mosi <= x_LSB_addr(3);
+                    if counter = 52 then
+                        state_reg <= SEND_RADDR2;
+                    end if;
+
+                when SEND_RADDR2 =>
+                    mosi <= x_LSB_addr(2);
+                    if counter = 56 then
+                        state_reg <= SEND_RADDR1;
+                    end if;
+
+                when SEND_RADDR1 =>
+                    mosi <= x_LSB_addr(1);
+                    if counter = 60 then
+                        state_reg <= SEND_RADDR0;
+                    end if;
+
+                when SEND_RADDR0 =>
+                    mosi <= x_LSB_addr(0);
+                    if counter = 64 then
+                        state_reg <= REC_XLSB7;
+                    end if;
+
+                -- Réception X
+                when REC_XLSB7 =>
+                    X(7) <= miso;
+                    if counter = 68 then
+                        state_reg <= REC_XLSB6;
+                    end if;
+
+                when REC_XLSB6 =>
+                    X(6) <= miso;
+                    if counter = 72 then
+                        state_reg <= REC_XLSB5;
+                    end if;
+
+                when REC_XLSB5 =>
+                    X(5) <= miso;
+                    if counter = 76 then
+                        state_reg <= REC_XLSB4;
+                    end if;
+
+                when REC_XLSB4 =>
+                    X(4) <= miso;
+                    if counter = 80 then
+                        state_reg <= REC_XLSB3;
+                    end if;
+
+                when REC_XLSB3 =>
+                    X(3) <= miso;
+                    if counter = 84 then
+                        state_reg <= REC_XLSB2;
+                    end if;
+
+                when REC_XLSB2 =>
+                    X(2) <= miso;
+                    if counter = 88 then
+                        state_reg <= REC_XLSB1;
+                    end if;
+
+                when REC_XLSB1 =>
+                    X(1) <= miso;
+                    if counter = 92 then
+                        state_reg <= REC_XLSB0;
+                    end if;
+
+                when REC_XLSB0 =>
+                    X(0) <= miso;
+                    if counter = 96 then
+                        state_reg <= REC_XMSB7;
+                    end if;
+
+                when REC_XMSB7 =>
+                    X(15) <= miso;
+                    if counter = 100 then
+                        state_reg <= REC_XMSB6;
+                    end if;
+
+                when REC_XMSB6 =>
+                    X(14) <= miso;
+                    if counter = 104 then
+                        state_reg <= REC_XMSB5;
+                    end if;
+
+                when REC_XMSB5 =>
+                    X(13) <= miso;
+                    if counter = 108 then
+                        state_reg <= REC_XMSB4;
+                    end if;
+
+                when REC_XMSB4 =>
+                    X(12) <= miso;
+                    if counter = 112 then
+                        state_reg <= REC_XMSB3;
+                    end if;
+
+                when REC_XMSB3 =>
+                    X(11) <= miso;
+                    if counter = 116 then
+                        state_reg <= REC_XMSB2;
+                    end if;
+
+                when REC_XMSB2 =>
+                    X(10) <= miso;
+                    if counter = 120 then
+                        state_reg <= REC_XMSB1;
+                    end if;
+
+                when REC_XMSB1 =>
+                    X(9) <= miso;
+                    if counter = 124 then
+                        state_reg <= REC_XMSB0;
+                    end if;
+
+                when REC_XMSB0 =>
+                    X(8) <= miso;
+                    if counter = 128 then
+                        state_reg <= REC_YLSB7;
+                    end if;
+
+                -- Réception Y
+                when REC_YLSB7 =>
+                    Y(7) <= miso;
+                    if counter = 132 then
+                        state_reg <= REC_YLSB6;
+                    end if;
+
+                when REC_YLSB6 =>
+                    Y(6) <= miso;
+                    if counter = 136 then
+                        state_reg <= REC_YLSB5;
+                    end if;
+
+                when REC_YLSB5 =>
+                    Y(5) <= miso;
+                    if counter = 140 then
+                        state_reg <= REC_YLSB4;
+                    end if;
+
+                when REC_YLSB4 =>
+                    Y(4) <= miso;
+                    if counter = 144 then
+                        state_reg <= REC_YLSB3;
+                    end if;
+
+                when REC_YLSB3 =>
+                    Y(3) <= miso;
+                    if counter = 148 then
+                        state_reg <= REC_YLSB2;
+                    end if;
+
+                when REC_YLSB2 =>
+                    Y(2) <= miso;
+                    if counter = 152 then
+                        state_reg <= REC_YLSB1;
+                    end if;
+
+                when REC_YLSB1 =>
+                    Y(1) <= miso;
+                    if counter = 156 then
+                        state_reg <= REC_YLSB0;
+                    end if;
+
+                when REC_YLSB0 =>
+                    Y(0) <= miso;
+                    if counter = 160 then
+                        state_reg <= REC_YMSB7;
+                    end if;
+
+                when REC_YMSB7 =>
+                    Y(15) <= miso;
+                    if counter = 164 then
+                        state_reg <= REC_YMSB6;
+                    end if;
+
+                when REC_YMSB6 =>
+                    Y(14) <= miso;
+                    if counter = 168 then
+                        state_reg <= REC_YMSB5;
+                    end if;
+
+                when REC_YMSB5 =>
+                    Y(13) <= miso;
+                    if counter = 172 then
+                        state_reg <= REC_YMSB4;
+                    end if;
+
+                when REC_YMSB4 =>
+                    Y(12) <= miso;
+                    if counter = 176 then
+                        state_reg <= REC_YMSB3;
+                    end if;
+
+                when REC_YMSB3 =>
+                    Y(11) <= miso;
+                    if counter = 180 then
+                        state_reg <= REC_YMSB2;
+                    end if;
+
+                when REC_YMSB2 =>
+                    Y(10) <= miso;
+                    if counter = 184 then
+                        state_reg <= REC_YMSB1;
+                    end if;
+
+                when REC_YMSB1 =>
+                    Y(9) <= miso;
+                    if counter = 188 then
+                        state_reg <= REC_YMSB0;
+                    end if;
+
+                when REC_YMSB0 =>
+                    Y(8) <= miso;
+                    if counter = 192 then
+                        state_reg <= REC_ZLSB7;
+                    end if;
+
+                -- Réception Z
+                when REC_ZLSB7 =>
+                    Z(7) <= miso;
+                    if counter = 196 then
+                        state_reg <= REC_ZLSB6;
+                    end if;
+
+                when REC_ZLSB6 =>
+                    Z(6) <= miso;
+                    if counter = 200 then
+                        state_reg <= REC_ZLSB5;
+                    end if;
+
+                when REC_ZLSB5 =>
+                    Z(5) <= miso;
+                    if counter = 204 then
+                        state_reg <= REC_ZLSB4;
+                    end if;
+
+                when REC_ZLSB4 =>
+                    Z(4) <= miso;
+                    if counter = 208 then
+                        state_reg <= REC_ZLSB3;
+                    end if;
+
+                when REC_ZLSB3 =>
+                    Z(3) <= miso;
+                    if counter = 212 then
+                        state_reg <= REC_ZLSB2;
+                    end if;
+
+                when REC_ZLSB2 =>
+                    Z(2) <= miso;
+                    if counter = 216 then
+                        state_reg <= REC_ZLSB1;
+                    end if;
+
+                when REC_ZLSB1 =>
+                    Z(1) <= miso;
+                    if counter = 220 then
+                        state_reg <= REC_ZLSB0;
+                    end if;
+
+                when REC_ZLSB0 =>
+                    Z(0) <= miso;
+                    if counter = 224 then
+                        state_reg <= REC_ZMSB7;
+                    end if;
+
+                when REC_ZMSB7 =>
+                    Z(15) <= miso;
+                    if counter = 228 then
+                        state_reg <= REC_ZMSB6;
+                    end if;
+
+                when REC_ZMSB6 =>
+                    Z(14) <= miso;
+                    if counter = 232 then
+                        state_reg <= REC_ZMSB5;
+                    end if;
+
+                when REC_ZMSB5 =>
+                    Z(13) <= miso;
+                    if counter = 236 then
+                        state_reg <= REC_ZMSB4;
+                    end if;
+
+                when REC_ZMSB4 =>
+                    Z(12) <= miso;
+                    if counter = 240 then
+                        state_reg <= REC_ZMSB3;
+                    end if;
+
+                when REC_ZMSB3 =>
+                    Z(11) <= miso;
+                    if counter = 244 then
+                        state_reg <= REC_ZMSB2;
+                    end if;
+
+                when REC_ZMSB2 =>
+                    Z(10) <= miso;
+                    if counter = 248 then
+                        state_reg <= REC_ZMSB1;
+                    end if;
+
+                when REC_ZMSB1 =>
+                    Z(9) <= miso;
+                    if counter = 252 then
+                        state_reg <= REC_ZMSB0;
+                    end if;
+
+                when REC_ZMSB0 =>
+                    Z(8) <= miso;
+                    if counter = 256 then
+                        cs           <= '1';
+                        sclk_control <= '0';
+                        state_reg    <= END_SPI;
+                    end if;
+
+                when END_SPI =>
+                    if counter = 40259 then
+                        counter   <= 0;
+                        state_reg <= BEGIN_SPIR;
+                    end if;
+
+            end case;
+        end if;
+    end process;
+
+    -----------------------------------------------------------------
+    -- Latch des données sur front descendant (comme ton always @negedge)
+    -----------------------------------------------------------------
+    latch_data <= '1' when (state_reg = END_SPI and counter = 258) else '0';
+
+    process(iclk)
+    begin
+        if falling_edge(iclk) then
+            if latch_data = '1' then
+                temp_DATA <= X(11 downto 7) & Y(11 downto 7) & Z(11 downto 7);
+            end if;
+        end if;
+    end process;
+
+end architecture;

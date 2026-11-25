@@ -1,0 +1,100 @@
+library ieee;
+use ieee.std_logic_1164.all;
+use ieee.numeric_std.all;
+
+
+entity top is
+    port (
+        CLK100MHZ : in  std_logic;
+        ACL_MISO  : in  std_logic;
+        ACL_MOSI  : out std_logic;
+        ACL_SCLK  : out std_logic;
+        ACL_CSN   : out std_logic;
+        LED       : out std_logic_vector(14 downto 0);
+        SEG       : out std_logic_vector(6 downto 0);
+        DP        : out std_logic;
+        AN        : out std_logic_vector(7 downto 0);
+        UART_TXD  : out std_logic
+    );
+end entity;
+
+architecture rtl of top is
+
+    signal w_4MHz   : std_logic;
+    signal acl_data : std_logic_vector(14 downto 0);
+
+    component iclk_genr is
+        port (
+            CLK100MHZ : in  std_logic;
+            clk_4MHz  : out std_logic
+        );
+    end component;
+
+    component spi_master is
+        port (
+            iclk     : in  std_logic;
+            miso     : in  std_logic;
+            sclk     : out std_logic;
+            mosi     : out std_logic;
+            cs       : out std_logic;
+            acl_data : out std_logic_vector(14 downto 0)
+        );
+    end component;
+
+    component seg7_control is
+        port (
+            CLK100MHZ : in  std_logic;
+            acl_data  : in  std_logic_vector(14 downto 0);
+            seg       : out std_logic_vector(6 downto 0);
+            dp        : out std_logic;
+            an        : out std_logic_vector(7 downto 0)
+        );
+    end component;
+
+    component uart_sender is
+        port (
+            clk       : in  std_logic;
+            reset_n   : in  std_logic;
+            acl_data  : in  std_logic_vector(14 downto 0);
+            txd       : out std_logic
+        );
+    end component;
+
+begin
+
+    -- clock 4 MHz
+    clock_generation : iclk_genr
+        port map (
+            CLK100MHZ => CLK100MHZ,
+            clk_4MHz  => w_4MHz
+        );
+
+    -- SPI master
+    master : spi_master
+        port map (
+            iclk     => w_4MHz,
+            miso     => ACL_MISO,
+            sclk     => ACL_SCLK,
+            mosi     => ACL_MOSI,
+            cs       => ACL_CSN,
+            acl_data => acl_data
+        );
+
+
+   
+
+    -- LEDs
+    LED(14 downto 10) <= acl_data(14 downto 10);
+    LED(9  downto 5)  <= acl_data(9  downto 5);
+    LED(4  downto 0)  <= acl_data(4  downto 0);
+
+    -- UART vers PC
+    U_UART : uart_sender
+        port map (
+            clk       => CLK100MHZ,
+            reset_n   => '1',         -- pas de reset externe, toujours actif
+            acl_data  => acl_data,
+            txd       => UART_TXD
+        );
+
+end architecture;
